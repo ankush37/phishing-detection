@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   url_analyzer:
-    build: 
+    build:
       context: ./api
       dockerfile: Dockerfile
     ports:
@@ -13,4 +11,38 @@ services:
       - FLASK_ENV=development
       - FLASK_APP=src/app.py
       - FLASK_DEBUG=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CACHE_EXPIRATION=3600
     command: flask run --host=0.0.0.0 --port=8000
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - url_analyzer_network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    networks:
+      - url_analyzer_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  url_analyzer_network:
+    driver: bridge
