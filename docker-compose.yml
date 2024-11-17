@@ -1,5 +1,5 @@
 services:
-  url_analyzer:
+  api:
     build:
       context: ./api
       dockerfile: Dockerfile
