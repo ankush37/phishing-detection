@@ -61,6 +61,14 @@ class URLCache:
         self.redis = redis_client
         self.default_expiration = CACHE_EXPIRATION
 
+    def delete(self, url: str) -> None:
+
+        """Delete cached analysis results for a URL"""
+
+        cache_key = self.generate_cache_key(url)
+
+        self.redis.delete(cache_key)
+
     def generate_cache_key(self, url: str) -> str:
         """Generate a unique cache key for a URL"""
         normalized_url = url.lower().strip()
@@ -221,19 +229,57 @@ class URLAnalyzer:
             with socket.create_connection((domain, 443)) as sock:
                 with context.wrap_socket(sock, server_hostname=domain) as ssock:
                     cert = ssock.getpeercert()
+                    
+                    # Extract common name from subject
+                    subject_cn = ''
+                    if cert.get('subject'):
+                        for field in cert['subject']:
+                            if field[0][0] == 'commonName':
+                                subject_cn = field[0][1]
+                                break
+                    
+                    # Extract issuer information
+                    issuer_cn = ''
+                    issuer_org = ''
+                    if cert.get('issuer'):
+                        for field in cert['issuer']:
+                            for item in field:
+                                if item[0] == 'commonName':
+                                    issuer_cn = item[1]
+                                elif item[0] == 'organizationName':
+                                    issuer_org = item[1]
+                    
+                    # Format expiry date
+                    expiry_date = datetime.strptime(
+                        cert['notAfter'],
+                        '%b %d %H:%M:%S %Y GMT'
+                    ) if cert.get('notAfter') else None
+                    
+                    # Get alternative names
+                    alt_names = []
+                    if cert.get('subjectAltName'):
+                        alt_names = [name[1] for name in cert['subjectAltName'] if name[0] == 'DNS']
+                    
                     return {
-                        'issued_to': cert.get('subject', [{}])[0].get('commonName', ''),
-                        'issuer': cert.get('issuer', [{}])[0].get('commonName', ''),
+                        'issued_to': subject_cn,
+                        'issuer': {
+                            'common_name': issuer_cn,
+                            'organization': issuer_org
+                        },
                         'version': cert.get('version', ''),
                         'has_ssl': True,
-                        'expiry_date': cert.get('notAfter', ''),
+                        'expiry_date': expiry_date.isoformat() if expiry_date else '',
+                        'serial_number': cert.get('serialNumber', ''),
+                        'alt_names': alt_names,
+                        'ocsp_servers': cert.get('OCSP', []),
+                        'ca_issuers': cert.get('caIssuers', [])
                     }
         except Exception as e:
             return {
                 'has_ssl': False,
                 'error': str(e)
             }
-
+    
     def get_domain_age(self, domain: str) -> Dict:
         """Get domain registration age and details"""
         try:
