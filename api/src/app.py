@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from datetime import datetime, timedelta
 import validators
 import tldextract
@@ -18,9 +19,11 @@ import json
 from functools import wraps
 import time
 import os
+from datetime import datetime, date, timedelta
+
 
 app = Flask(__name__)
-
+CORS(app)
 # Get Redis configuration from environment variables
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')  # Default to 'redis' service name
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -60,9 +63,7 @@ class URLCache:
 
     def generate_cache_key(self, url: str) -> str:
         """Generate a unique cache key for a URL"""
-        # Normalize URL to ensure consistent caching
         normalized_url = url.lower().strip()
-        # Create hash to handle long URLs and special characters
         return f"url_analysis:{hashlib.md5(normalized_url.encode()).hexdigest()}"
 
     def get(self, url: str) -> Optional[Dict]:
@@ -77,30 +78,59 @@ class URLCache:
                 return None
         return None
 
+    def datetime_handler(self, obj):
+        """Handler for datetime objects during JSON serialization"""
+        if isinstance(obj, (datetime, date)):  # Now date is properly imported
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
     def set(self, url: str, analysis_result: Dict, expiration: int = None) -> None:
-        """Cache analysis results for a URL"""
+        """Cache analysis results for a URL with proper datetime handling"""
         cache_key = self.generate_cache_key(url)
         expiration = expiration or self.default_expiration
         
         try:
-            # Add timestamp to cached data
-            analysis_result['cached_at'] = datetime.now().isoformat()
-            analysis_result['cache_expiration'] = (
-                datetime.now() + timedelta(seconds=expiration)
-            ).isoformat()
+            # Convert all datetime objects in the analysis result
+            current_time = datetime.now()
+            expire_time = current_time + timedelta(seconds=expiration)
+            
+            # Deep copy the analysis result to avoid modifying the original
+            result_to_cache = analysis_result.copy()
+            
+            # Add timestamp information
+            result_to_cache['cached_at'] = current_time.isoformat()
+            result_to_cache['cache_expiration'] = expire_time.isoformat()
+            
+            # Handle datetime objects in security features
+            if 'security_features' in result_to_cache:
+                domain_age = result_to_cache['security_features'].get('domain_age', {})
+                if domain_age:
+                    if 'creation_date' in domain_age:
+                        creation_date = domain_age['creation_date']
+                        if creation_date:
+                            domain_age['creation_date'] = (
+                                creation_date.isoformat() if isinstance(creation_date, (datetime, date))
+                                else creation_date
+                            )
+                    if 'expiration_date' in domain_age:
+                        expiration_date = domain_age['expiration_date']
+                        if expiration_date:
+                            domain_age['expiration_date'] = (
+                                expiration_date.isoformat() if isinstance(expiration_date, (datetime, date))
+                                else expiration_date
+                            )
+            
+            # Serialize with custom handler for any remaining datetime objects
+            cached_data = json.dumps(result_to_cache, default=self.datetime_handler)
             
             self.redis.setex(
                 cache_key,
                 expiration,
-                json.dumps(analysis_result)
+                cached_data
             )
         except Exception as e:
             app.logger.error(f"Cache setting error: {str(e)}")
 
-    def delete(self, url: str) -> None:
-        """Delete cached analysis results for a URL"""
-        cache_key = self.generate_cache_key(url)
-        self.redis.delete(cache_key)
 
 class CacheStats:
     def __init__(self, redis_client):
@@ -184,10 +214,88 @@ class URLAnalyzer:
             'int', 'eu', 'uk', 'us', 'ca', 'au'
         }
 
+    def get_ssl_info(self, domain: str) -> Dict:
+        """Check SSL certificate information"""
+        try:
+            context = ssl.create_default_context()
+            with socket.create_connection((domain, 443)) as sock:
+                with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                    cert = ssock.getpeercert()
+                    return {
+                        'issued_to': cert.get('subject', [{}])[0].get('commonName', ''),
+                        'issuer': cert.get('issuer', [{}])[0].get('commonName', ''),
+                        'version': cert.get('version', ''),
+                        'has_ssl': True,
+                        'expiry_date': cert.get('notAfter', ''),
+                    }
+        except Exception as e:
+            return {
+                'has_ssl': False,
+                'error': str(e)
+            }
+
+    def get_domain_age(self, domain: str) -> Dict:
+        """Get domain registration age and details"""
+        try:
+            w = whois.whois(domain)
+            creation_date = w.creation_date
+            expiration_date = w.expiration_date
+            
+            if isinstance(creation_date, list):
+                creation_date = creation_date[0]
+            
+            age = (datetime.now() - creation_date).days if creation_date else 0
+            
+            return {
+                'age_days': age,
+                'registrar': w.registrar,
+                'creation_date': creation_date,
+                'expiration_date': expiration_date,
+            }
+        except Exception:
+            return {'age_days': 0, 'error': 'Unable to fetch domain age'}
+
+    def check_dns_records(self, domain: str) -> Dict:
+        """Check various DNS records"""
+        records = {}
+        try:
+            # A Record
+            a_records = dns.resolver.resolve(domain, 'A')
+            records['A'] = [str(r) for r in a_records]
+            
+            # MX Record
+            try:
+                mx_records = dns.resolver.resolve(domain, 'MX')
+                records['MX'] = [str(r) for r in mx_records]
+            except:
+                records['MX'] = []
+            
+            # TXT Record
+            try:
+                txt_records = dns.resolver.resolve(domain, 'TXT')
+                records['TXT'] = [str(r) for r in txt_records]
+            except:
+                records['TXT'] = []
+                
+            return records
+        except Exception as e:
+            return {'error': str(e)}
+
+    def check_redirect_chain(self, url: str, max_redirects: int = 5) -> List[str]:
+        """Check URL redirect chain"""
+        redirect_chain = []
+        try:
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+            response = opener.open(url)
+            redirect_chain = [response.geturl()]
+        except Exception as e:
+            pass
+        return redirect_chain
+
     @cache_decorator(expiration=CACHE_EXPIRATION)
     def analyze_url(self, url: str) -> Dict[str, Any]:
         """Main URL analysis method with caching"""
-        # Previous analysis code remains the same
         analysis_result = {
             'url': url,
             'timestamp': datetime.now().isoformat(),
@@ -199,6 +307,109 @@ class URLAnalyzer:
             'redirect_chain': [],
             'recommendations': []
         }
+
+        if not validators.url(url):
+            analysis_result['risk_factors'].append('Invalid URL format')
+            analysis_result['risk_score'] = 100
+            return analysis_result
+
+        analysis_result['is_valid_url'] = True
+        
+        # Extract domain information
+        extracted = tldextract.extract(url)
+        parsed_url = urlparse(url)
+        
+        # Basic domain info
+        domain_info = {
+            'subdomain': extracted.subdomain,
+            'domain': extracted.domain,
+            'suffix': extracted.suffix,
+            'full_domain': extracted.fqdn,
+            'path': parsed_url.path,
+            'query': parsed_url.query
+        }
+        analysis_result['domain_info'] = domain_info
+
+        # Security checks
+        security_features = {
+            'ssl_info': self.get_ssl_info(extracted.fqdn),
+            'domain_age': self.get_domain_age(extracted.fqdn),
+            'dns_records': self.check_dns_records(extracted.fqdn)
+        }
+        analysis_result['security_features'] = security_features
+
+        # Risk scoring
+        risk_score = 0
+        
+        # 1. URL Structure Analysis
+        if len(url) > 100:
+            analysis_result['risk_factors'].append('Unusually long URL')
+            risk_score += 15
+            analysis_result['recommendations'].append('Consider using a shorter URL')
+
+        # 2. Domain Age Analysis
+        domain_age = security_features['domain_age'].get('age_days', 0)
+        if domain_age < 30:
+            analysis_result['risk_factors'].append('Domain is less than 30 days old')
+            risk_score += 25
+            analysis_result['recommendations'].append('Exercise caution with newly registered domains')
+
+        # 3. SSL/TLS Analysis
+        if not security_features['ssl_info'].get('has_ssl', False):
+            analysis_result['risk_factors'].append('No SSL/TLS security')
+            risk_score += 30
+            analysis_result['recommendations'].append('Implement SSL/TLS security')
+
+        # 4. Suspicious Pattern Analysis
+        for pattern in self.suspicious_patterns:
+            if re.search(pattern, extracted.fqdn, re.IGNORECASE):
+                analysis_result['risk_factors'].append(f'Suspicious pattern detected: {pattern}')
+                risk_score += 20
+
+        # 5. Special Character Analysis
+        special_chars = re.findall(r'[^a-zA-Z0-9-.]', extracted.fqdn)
+        if special_chars:
+            analysis_result['risk_factors'].append('Contains special characters in domain')
+            risk_score += 15
+            analysis_result['recommendations'].append('Avoid special characters in domain name')
+
+        # 6. TLD Analysis
+        if extracted.suffix not in self.legitimate_tlds:
+            analysis_result['risk_factors'].append('Suspicious TLD')
+            risk_score += 20
+            analysis_result['recommendations'].append('Consider using more established TLDs')
+
+        # 7. Keyword Analysis
+        domain_text = f"{extracted.domain}.{extracted.suffix}".lower()
+        suspicious_keywords_found = [k for k in self.suspicious_keywords if k in domain_text]
+        if suspicious_keywords_found:
+            analysis_result['risk_factors'].append(f'Suspicious keywords found: {suspicious_keywords_found}')
+            risk_score += 15
+
+        # 8. DNS Record Analysis
+        if not security_features['dns_records'].get('MX', []):
+            analysis_result['risk_factors'].append('No MX records found')
+            risk_score += 10
+
+        # Check redirect chain
+        redirect_chain = self.check_redirect_chain(url)
+        if len(redirect_chain) > 1:
+            analysis_result['risk_factors'].append('Multiple redirects detected')
+            risk_score += 15
+            analysis_result['redirect_chain'] = redirect_chain
+
+        # Normalize risk score to 0-100
+        analysis_result['risk_score'] = min(100, risk_score)
+
+        # Add risk level classification
+        if analysis_result['risk_score'] >= 80:
+            analysis_result['risk_level'] = 'Critical'
+        elif analysis_result['risk_score'] >= 60:
+            analysis_result['risk_level'] = 'High'
+        elif analysis_result['risk_score'] >= 40:
+            analysis_result['risk_level'] = 'Medium'
+        else:
+            analysis_result['risk_level'] = 'Low'
         
         return analysis_result
 
