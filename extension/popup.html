@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phishing Shield</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    </svg>
+                    <h1>Phishing Shield</h1>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div id="status" class="status-container">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <span>Initializing...</span>
+                </div>
+            </div>
+
+            <div id="analysis" class="analysis-container"></div>
+        </main>
+
+        <footer class="footer">
+            <div id="debugLog" class="debug-log"></div>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>
