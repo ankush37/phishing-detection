@@ -15,6 +15,18 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
       - CACHE_EXPIRATION=3600
+      # Threat Intelligence Configuration
+      - FEED_UPDATE_INTERVAL=21600
+      - FEED_CACHE_DURATION=86400
+      - PHISHTANK_URL=https://data.phishtank.com/data/online-valid.json
+      - OPENPHISH_URL=https://openphish.com/feed.txt
+      - URLHAUS_URL=https://urlhaus.abuse.ch/downloads/text_recent/
+      # Risk Scoring Weights
+      - WEIGHT_DOMAIN_AGE=0.3
+      - WEIGHT_SSL=0.2
+      - WEIGHT_URL_PATTERNS=0.15
+      - WEIGHT_THREAT_INTEL=0.5
+      - WHITELIST_REDUCTION_FACTOR=0.5
     command: flask run --host=0.0.0.0 --port=8000
     depends_on:
       redis:

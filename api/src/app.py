@@ -3,329 +3,92 @@ from flask_cors import CORS
 from datetime import datetime, timedelta
 import validators
 import tldextract
-import requests
-import re
 from urllib.parse import urlparse
-import whois
-import dns.resolver
-import socket
-import ssl
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
-import hashlib
 import urllib.request
-import redis
-import json
-from functools import wraps
-import time
+from typing import Dict, List, Any, Optional
 import os
-from datetime import datetime, date, timedelta
 
+# Import modularized components
+from analyze.risk_analyzer import RiskAnalyzer
+from analyze.security_checks import SecurityChecker
+from utils.redis_client import get_redis_client
+from utils.logger import setup_logger
+from threat_intel.feed_manager import FeedManager
+from config.default import Config
 
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
-# Get Redis configuration from environment variables
-REDIS_HOST = os.getenv('REDIS_HOST', 'redis')  # Default to 'redis' service name
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-REDIS_DB = int(os.getenv('REDIS_DB', 0))
-CACHE_EXPIRATION = int(os.getenv('CACHE_EXPIRATION', 3600))
 
-def get_redis_client(max_retries=5, retry_delay=2):
-    for attempt in range(max_retries):
-        try:
-            client = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5
-            )
-            client.ping()  # Test connection
-            return client
-        except redis.ConnectionError as e:
-            if attempt == max_retries - 1:
-                app.logger.error(f"Failed to connect to Redis after {max_retries} attempts: {str(e)}")
-                raise
-            app.logger.warning(f"Redis connection attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+# Setup logging
+logger = setup_logger('app')
 
+# Initialize components
 try:
     redis_client = get_redis_client()
-except redis.ConnectionError:
-    app.logger.error("Unable to establish Redis connection. Running without cache.")
+    # Initialize FeedManager
+    feed_manager = FeedManager(redis_client)
+    # Start feed updates in background
+    feed_manager.start_feed_updates()
+except Exception as e:
+    logger.error(f"Initialization failed: {str(e)}")
     redis_client = None
+    feed_manager = None
+
+security_checker = SecurityChecker()
+risk_analyzer = RiskAnalyzer()
 
 class URLCache:
     def __init__(self, redis_client):
         self.redis = redis_client
-        self.default_expiration = CACHE_EXPIRATION
-
-    def delete(self, url: str) -> None:
-
-        """Delete cached analysis results for a URL"""
-
-        cache_key = self.generate_cache_key(url)
-
-        self.redis.delete(cache_key)
+        self.default_expiration = Config.CACHE_EXPIRATION
 
     def generate_cache_key(self, url: str) -> str:
         """Generate a unique cache key for a URL"""
+        from hashlib import md5
         normalized_url = url.lower().strip()
-        return f"url_analysis:{hashlib.md5(normalized_url.encode()).hexdigest()}"
+        return f"url_analysis:{md5(normalized_url.encode()).hexdigest()}"
 
     def get(self, url: str) -> Optional[Dict]:
-        """Retrieve cached analysis results for a URL"""
+        """Retrieve cached analysis results"""
+        if not self.redis:
+            return None
+            
         cache_key = self.generate_cache_key(url)
         cached_data = self.redis.get(cache_key)
         
         if cached_data:
             try:
-                return json.loads(cached_data)
-            except json.JSONDecodeError:
+                return eval(cached_data)
+            except:
                 return None
         return None
 
-    def datetime_handler(self, obj):
-        """Handler for datetime objects during JSON serialization"""
-        if isinstance(obj, (datetime, date)):  # Now date is properly imported
-            return obj.isoformat()
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
     def set(self, url: str, analysis_result: Dict, expiration: int = None) -> None:
-        """Cache analysis results for a URL with proper datetime handling"""
+        """Cache analysis results"""
+        if not self.redis:
+            return
+            
         cache_key = self.generate_cache_key(url)
         expiration = expiration or self.default_expiration
         
         try:
-            # Convert all datetime objects in the analysis result
-            current_time = datetime.now()
-            expire_time = current_time + timedelta(seconds=expiration)
-            
-            # Deep copy the analysis result to avoid modifying the original
-            result_to_cache = analysis_result.copy()
-            
-            # Add timestamp information
-            result_to_cache['cached_at'] = current_time.isoformat()
-            result_to_cache['cache_expiration'] = expire_time.isoformat()
-            
-            # Handle datetime objects in security features
-            if 'security_features' in result_to_cache:
-                domain_age = result_to_cache['security_features'].get('domain_age', {})
-                if domain_age:
-                    if 'creation_date' in domain_age:
-                        creation_date = domain_age['creation_date']
-                        if creation_date:
-                            domain_age['creation_date'] = (
-                                creation_date.isoformat() if isinstance(creation_date, (datetime, date))
-                                else creation_date
-                            )
-                    if 'expiration_date' in domain_age:
-                        expiration_date = domain_age['expiration_date']
-                        if expiration_date:
-                            domain_age['expiration_date'] = (
-                                expiration_date.isoformat() if isinstance(expiration_date, (datetime, date))
-                                else expiration_date
-                            )
-            
-            # Serialize with custom handler for any remaining datetime objects
-            cached_data = json.dumps(result_to_cache, default=self.datetime_handler)
-            
-            self.redis.setex(
-                cache_key,
-                expiration,
-                cached_data
-            )
+            self.redis.setex(cache_key, expiration, str(analysis_result))
         except Exception as e:
-            app.logger.error(f"Cache setting error: {str(e)}")
+            logger.error(f"Cache setting error: {str(e)}")
 
-
-class CacheStats:
-    def __init__(self, redis_client):
-        self.redis = redis_client
-        self.stats_key = "url_analysis:stats"
-        
-    def increment_hit(self):
-        """Increment cache hit counter"""
-        self.redis.hincrby(self.stats_key, "hits", 1)
-        
-    def increment_miss(self):
-        """Increment cache miss counter"""
-        self.redis.hincrby(self.stats_key, "misses", 1)
-        
-    def get_stats(self) -> Dict:
-        """Get cache statistics"""
-        stats = self.redis.hgetall(self.stats_key)
-        return {
-            "hits": int(stats.get("hits", 0)),
-            "misses": int(stats.get("misses", 0)),
-            "total_requests": int(stats.get("hits", 0)) + int(stats.get("misses", 0))
-        }
-
-# Initialize cache and stats
-url_cache = URLCache(redis_client)
-cache_stats = CacheStats(redis_client)
-
-def cache_decorator(expiration=None):
-    """Decorator for caching function results"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(self, url: str, *args, **kwargs):
-            # Check cache first
-            cached_result = url_cache.get(url)
+    def delete(self, url: str) -> None:
+        """Delete cached analysis results"""
+        if not self.redis:
+            return
             
-            if cached_result:
-                cache_stats.increment_hit()
-                cached_result['cache_hit'] = True
-                return cached_result
-            
-            # If not in cache, execute function and cache result
-            cache_stats.increment_miss()
-            result = func(self, url, *args, **kwargs)
-            url_cache.set(url, result, expiration)
-            result['cache_hit'] = False
-            
-            return result
-        return wrapper
-    return decorator
-
-@dataclass
-class SecurityFeatures:
-    ssl_info: Dict
-    domain_age: int
-    dns_records: Dict
-    registration_details: Dict
+        cache_key = self.generate_cache_key(url)
+        self.redis.delete(cache_key)
 
 class URLAnalyzer:
     def __init__(self):
- 
-        self.suspicious_patterns = [
-            r'paypal.*\.com',
-            r'.*\.tk$',
-            r'\d{4,}',
-            r'.*-.*\.com',
-            r'.*\.temp\..+',
-            r'.*\.xyz$',
-            r'.*\.(work|click|loan|top|gq|ml|ga|cf)$',
-            r'.*\.(zip|review|country|kim|cricket|science|party)$',
-            r'.*\.(bank|secure|account|login|signin|security).*'
-        ]
-        
-        self.suspicious_keywords = [
-            'login', 'signin', 'security', 'update', 'verify',
-            'authenticate', 'account', 'banking', 'password',
-            'credential', 'confirm', 'verification'
-        ]
-
-        self.legitimate_tlds = {
-            'com', 'org', 'net', 'edu', 'gov', 'mil',
-            'int', 'eu', 'uk', 'us', 'ca', 'au'
-        }
-
-    def get_ssl_info(self, domain: str) -> Dict:
-        """Check SSL certificate information"""
-        try:
-            context = ssl.create_default_context()
-            with socket.create_connection((domain, 443)) as sock:
-                with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                    cert = ssock.getpeercert()
-                    
-                    # Extract common name from subject
-                    subject_cn = ''
-                    if cert.get('subject'):
-                        for field in cert['subject']:
-                            if field[0][0] == 'commonName':
-                                subject_cn = field[0][1]
-                                break
-                    
-                    # Extract issuer information
-                    issuer_cn = ''
-                    issuer_org = ''
-                    if cert.get('issuer'):
-                        for field in cert['issuer']:
-                            for item in field:
-                                if item[0] == 'commonName':
-                                    issuer_cn = item[1]
-                                elif item[0] == 'organizationName':
-                                    issuer_org = item[1]
-                    
-                    # Format expiry date
-                    expiry_date = datetime.strptime(
-                        cert['notAfter'],
-                        '%b %d %H:%M:%S %Y GMT'
-                    ) if cert.get('notAfter') else None
-                    
-                    # Get alternative names
-                    alt_names = []
-                    if cert.get('subjectAltName'):
-                        alt_names = [name[1] for name in cert['subjectAltName'] if name[0] == 'DNS']
-                    
-                    return {
-                        'issued_to': subject_cn,
-                        'issuer': {
-                            'common_name': issuer_cn,
-                            'organization': issuer_org
-                        },
-                        'version': cert.get('version', ''),
-                        'has_ssl': True,
-                        'expiry_date': expiry_date.isoformat() if expiry_date else '',
-                        'serial_number': cert.get('serialNumber', ''),
-                        'alt_names': alt_names,
-                        'ocsp_servers': cert.get('OCSP', []),
-                        'ca_issuers': cert.get('caIssuers', [])
-                    }
-        except Exception as e:
-            return {
-                'has_ssl': False,
-                'error': str(e)
-            }
-    
-    def get_domain_age(self, domain: str) -> Dict:
-        """Get domain registration age and details"""
-        try:
-            w = whois.whois(domain)
-            creation_date = w.creation_date
-            expiration_date = w.expiration_date
-            
-            if isinstance(creation_date, list):
-                creation_date = creation_date[0]
-            
-            age = (datetime.now() - creation_date).days if creation_date else 0
-            
-            return {
-                'age_days': age,
-                'registrar': w.registrar,
-                'creation_date': creation_date,
-                'expiration_date': expiration_date,
-            }
-        except Exception:
-            return {'age_days': 0, 'error': 'Unable to fetch domain age'}
-
-    def check_dns_records(self, domain: str) -> Dict:
-        """Check various DNS records"""
-        records = {}
-        try:
-            # A Record
-            a_records = dns.resolver.resolve(domain, 'A')
-            records['A'] = [str(r) for r in a_records]
-            
-            # MX Record
-            try:
-                mx_records = dns.resolver.resolve(domain, 'MX')
-                records['MX'] = [str(r) for r in mx_records]
-            except:
-                records['MX'] = []
-            
-            # TXT Record
-            try:
-                txt_records = dns.resolver.resolve(domain, 'TXT')
-                records['TXT'] = [str(r) for r in txt_records]
-            except:
-                records['TXT'] = []
-                
-            return records
-        except Exception as e:
-            return {'error': str(e)}
+        self.security_checker = SecurityChecker()
+        self.risk_analyzer = RiskAnalyzer()
 
     def check_redirect_chain(self, url: str, max_redirects: int = 5) -> List[str]:
         """Check URL redirect chain"""
@@ -339,34 +102,70 @@ class URLAnalyzer:
             pass
         return redirect_chain
 
-    @cache_decorator(expiration=CACHE_EXPIRATION)
+
+    def determine_risk_level(self, total_score: float) -> str:
+        """Determine risk level based on total weighted score"""
+        if total_score >= 80:
+            return 'Critical'
+        elif total_score >= 60:
+            return 'High'
+        elif total_score >= 40:
+            return 'Medium'
+        elif total_score >= 20:
+            return 'Low'
+        return 'Minimal'
+
+    def calculate_threat_score(self, threat_intel: Dict) -> tuple[float, List[str]]:
+        """Calculate threat intelligence score (weight: 0.35)"""
+        threat_factors = []
+        
+        if not threat_intel.get('is_malicious'):
+            return 0, threat_factors
+
+        sources = threat_intel.get('sources', [])
+        source_names = [source['feed'] for source in sources]
+        threat_factors.append(f"URL found in threat feeds: {', '.join(source_names)}")
+        
+        # Calculate threat score based on sources
+        threat_score = 100 if sources else 0
+        
+        return threat_score, threat_factors
+
     def analyze_url(self, url: str) -> Dict[str, Any]:
-        """Main URL analysis method with caching"""
+        """Main URL analysis method"""
         analysis_result = {
             'url': url,
             'timestamp': datetime.now().isoformat(),
             'is_valid_url': False,
             'domain_info': {},
             'security_features': {},
-            'risk_factors': [],
-            'risk_score': 0,
+            'risk_assessment': {},
             'redirect_chain': [],
-            'recommendations': []
+            'recommendations': [],
+            'threat_intel': {}
         }
 
+        # Handle invalid URLs
         if not validators.url(url):
-            analysis_result['risk_factors'].append('Invalid URL format')
-            analysis_result['risk_score'] = 100
+            analysis_result['risk_assessment'] = {
+                'risk_factors': ['Invalid URL format'],
+                'risk_score': 100,
+                'risk_level': 'Critical',
+                'category_scores': {
+                    'domain_age': 100,
+                    'ssl_score': 100,
+                    'url_patterns': 100,
+                    'threat_intel': 100
+                }
+            }
             return analysis_result
 
         analysis_result['is_valid_url'] = True
         
-        # Extract domain information
+        # Extract and set domain information
         extracted = tldextract.extract(url)
         parsed_url = urlparse(url)
-        
-        # Basic domain info
-        domain_info = {
+        analysis_result['domain_info'] = {
             'subdomain': extracted.subdomain,
             'domain': extracted.domain,
             'suffix': extracted.suffix,
@@ -374,112 +173,121 @@ class URLAnalyzer:
             'path': parsed_url.path,
             'query': parsed_url.query
         }
-        analysis_result['domain_info'] = domain_info
 
-        # Security checks
+        # Get security features
         security_features = {
-            'ssl_info': self.get_ssl_info(extracted.fqdn),
-            'domain_age': self.get_domain_age(extracted.fqdn),
-            'dns_records': self.check_dns_records(extracted.fqdn)
+            'ssl_info': self.security_checker.get_ssl_info(extracted.fqdn),
+            'domain_age': self.security_checker.get_domain_age(extracted.fqdn),
+            'dns_records': self.security_checker.check_dns_records(extracted.fqdn)
         }
         analysis_result['security_features'] = security_features
 
-        # Risk scoring
-        risk_score = 0
+        # Get base risk analysis
+        risk_analysis = self.risk_analyzer.analyze_risk(
+            url,
+            analysis_result['domain_info'],
+            security_features
+        )
         
-        # 1. URL Structure Analysis
-        if len(url) > 100:
-            analysis_result['risk_factors'].append('Unusually long URL')
-            risk_score += 15
-            analysis_result['recommendations'].append('Consider using a shorter URL')
+        # Get threat intelligence score
+        threat_intel = feed_manager.check_url(url) if feed_manager else {'is_malicious': False, 'sources': []}
+        analysis_result['threat_intel'] = threat_intel
+        threat_score, threat_factors = self.calculate_threat_score(threat_intel)
+        
+        # Combine all scores using Config weights
+        risk_scores = risk_analysis['risk_scores']
+        risk_scores['threat_intel'] = threat_score
+        
+        # Calculate final score using Config.RISK_WEIGHTS
+        final_score = sum(
+            score * Config.RISK_WEIGHTS[category]
+            for category, score in risk_scores.items()
+        )
 
-        # 2. Domain Age Analysis
-        domain_age = security_features['domain_age'].get('age_days', 0)
-        if domain_age < 30:
-            analysis_result['risk_factors'].append('Domain is less than 30 days old')
-            risk_score += 25
-            analysis_result['recommendations'].append('Exercise caution with newly registered domains')
+        # Apply whitelist reduction if applicable
+        if self._is_whitelisted(analysis_result['domain_info']):
+            final_score *= Config.WHITELIST_REDUCTION_FACTOR
+            risk_analysis['risk_factors'].append('Score reduced due to whitelisted domain')
 
-        # 3. SSL/TLS Analysis
-        if not security_features['ssl_info'].get('has_ssl', False):
-            analysis_result['risk_factors'].append('No SSL/TLS security')
-            risk_score += 30
-            analysis_result['recommendations'].append('Implement SSL/TLS security')
+        # Set final risk assessment
+        analysis_result['risk_assessment'] = {
+            'risk_score': min(100, round(final_score, 2)),
+            'risk_factors': risk_analysis['risk_factors'] + threat_factors,
+            'risk_level': self.determine_risk_level(final_score),
+            'category_scores': risk_scores
+        }
 
-        # 4. Suspicious Pattern Analysis
-        for pattern in self.suspicious_patterns:
-            if re.search(pattern, extracted.fqdn, re.IGNORECASE):
-                analysis_result['risk_factors'].append(f'Suspicious pattern detected: {pattern}')
-                risk_score += 20
-
-        # 5. Special Character Analysis
-        special_chars = re.findall(r'[^a-zA-Z0-9-.]', extracted.fqdn)
-        if special_chars:
-            analysis_result['risk_factors'].append('Contains special characters in domain')
-            risk_score += 15
-            analysis_result['recommendations'].append('Avoid special characters in domain name')
-
-        # 6. TLD Analysis
-        if extracted.suffix not in self.legitimate_tlds:
-            analysis_result['risk_factors'].append('Suspicious TLD')
-            risk_score += 20
-            analysis_result['recommendations'].append('Consider using more established TLDs')
-
-        # 7. Keyword Analysis
-        domain_text = f"{extracted.domain}.{extracted.suffix}".lower()
-        suspicious_keywords_found = [k for k in self.suspicious_keywords if k in domain_text]
-        if suspicious_keywords_found:
-            analysis_result['risk_factors'].append(f'Suspicious keywords found: {suspicious_keywords_found}')
-            risk_score += 15
-
-        # 8. DNS Record Analysis
-        if not security_features['dns_records'].get('MX', []):
-            analysis_result['risk_factors'].append('No MX records found')
-            risk_score += 10
-
-        # Check redirect chain
+        # Add redirect chain analysis
         redirect_chain = self.check_redirect_chain(url)
         if len(redirect_chain) > 1:
-            analysis_result['risk_factors'].append('Multiple redirects detected')
-            risk_score += 15
             analysis_result['redirect_chain'] = redirect_chain
+            analysis_result['risk_assessment']['risk_factors'].append(
+                f'Multiple redirects detected: {len(redirect_chain)} redirects'
+            )
 
-        # Normalize risk score to 0-100
-        analysis_result['risk_score'] = min(100, risk_score)
-
-        # Add risk level classification
-        if analysis_result['risk_score'] >= 80:
-            analysis_result['risk_level'] = 'Critical'
-        elif analysis_result['risk_score'] >= 60:
-            analysis_result['risk_level'] = 'High'
-        elif analysis_result['risk_score'] >= 40:
-            analysis_result['risk_level'] = 'Medium'
-        else:
-            analysis_result['risk_level'] = 'Low'
+        # Generate recommendations
+        self._generate_recommendations(analysis_result)
         
         return analysis_result
+    
+    def _is_whitelisted(self, domain_info: Dict) -> bool:
+        """Check if domain is whitelisted"""
+        trusted_tlds = {'gov', 'edu', 'mil'}
+        return domain_info.get('suffix', '').lower() in trusted_tlds
 
-analyzer = URLAnalyzer()
+    def _generate_recommendations(self, analysis_result: Dict) -> None:
+        """Generate recommendations based on risk assessment"""
+        recommendations = []
+        risk_factors = analysis_result['risk_assessment'].get('risk_factors', [])
+        
+        for factor in risk_factors:
+            if 'SSL' in factor:
+                recommendations.append('Implement SSL/TLS security')
+            elif 'domain age' in factor.lower():
+                recommendations.append('Exercise caution with newly registered domains')
+            elif 'redirect' in factor.lower():
+                recommendations.append('Investigate redirect chain for potential security risks')
+                
+        analysis_result['recommendations'] = recommendations
+    
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
+# Initialize components
+url_cache = URLCache(redis_client)
+url_analyzer = URLAnalyzer()
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_url():
+    """Endpoint for URL analysis"""
     try:
         data = request.get_json()
         
         if not data or 'url' not in data:
             return jsonify({
-                'error': 'No URL provided',
-                'status': 'error'
+                'status': 'error',
+                'error': 'No URL provided'
             }), 400
 
         url = data['url']
         force_refresh = data.get('force_refresh', False)
         
         if force_refresh:
-            # Delete existing cache entry if force refresh is requested
             url_cache.delete(url)
+            
+        # Check cache first
+        cached_result = url_cache.get(url)
+        if cached_result and not force_refresh:
+            cached_result['cache_hit'] = True
+            return jsonify({
+                'status': 'success',
+                'data': cached_result
+            })
+
+        # Perform analysis
+        result = url_analyzer.analyze_url(url)
+        result['cache_hit'] = False
         
-        result = analyzer.analyze_url(url)
+        # Cache the result
+        url_cache.set(url, result)
         
         return jsonify({
             'status': 'success',
@@ -487,49 +295,28 @@ def analyze():
         })
 
     except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'status': 'error'
-        }), 500
-
-@app.route('/cache/stats', methods=['GET'])
-def get_cache_stats():
-    """Endpoint to get cache statistics"""
-    stats = cache_stats.get_stats()
-    return jsonify({
-        'status': 'success',
-        'data': stats
-    })
-
-@app.route('/cache/clear', methods=['POST'])
-def clear_cache():
-    """Endpoint to clear the entire cache"""
-    try:
-        redis_client.flushdb()
-        return jsonify({
-            'status': 'success',
-            'message': 'Cache cleared successfully'
-        })
-    except Exception as e:
+        logger.error(f"Analysis error: {str(e)}")
         return jsonify({
             'status': 'error',
             'error': str(e)
         }), 500
 
-@app.route('/health', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
 def health_check():
-    """Enhanced health check endpoint with cache status"""
-    redis_status = "healthy"
-    try:
-        redis_client.ping()
-    except redis.ConnectionError:
-        redis_status = "unhealthy"
-
+    """Health check endpoint"""
+    redis_status = "healthy" if redis_client else "unhealthy"
+    feed_status = "healthy" if feed_manager else "unhealthy"
+    
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.0.0',
-        'cache_status': redis_status
+        'components': {
+            'redis': redis_status,
+            'security_checker': 'healthy',
+            'risk_analyzer': 'healthy',
+            'feed_manager': feed_status
+        },
+        'version': '3.1.0'
     })
 
 if __name__ == '__main__':
