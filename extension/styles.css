@@ -291,3 +291,64 @@ body {
   left: 0;
   color: var(--primary-color);
 }
+
+/* Add to your existing styles.css */
+.security-indicators {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.indicator {
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.indicator.secure {
+  background-color: #dcfce7;
+  color: #166534;
+}
+
+.indicator.warning {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.indicator.danger {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
+
+.indicator.info {
+  background-color: #e0f2fe;
+  color: #075985;
+}
+
+.analysis-section ul {
+  list-style: none;
+}
+
+.analysis-section li {
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  margin-bottom: 0.5rem;
+  background-color: #f8fafc;
+}
+
+.risk-level.critical .risk-score strong,
+.risk-level.high .risk-score strong {
+  color: #dc2626;
+}
+
+.risk-level.medium .risk-score strong {
+  color: #d97706;
+}
+
+.risk-level.low .risk-score strong {
+  color: #059669;
+}
