@@ -1,8 +1,15 @@
-function getRiskLevel(score) {
-  if (score >= 80) return 'Critical';
-  if (score >= 60) return 'High';
-  if (score >= 40) return 'Medium';
-  return 'Low';
+// Helper function to get current tab URL
+async function getCurrentTabUrl() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs[0]?.url;
+}
+
+function getRiskLevel(data) {
+  return data.risk_assessment?.risk_level || 'Unknown';
+}
+
+function getRiskScore(data) {
+  return data.risk_assessment?.risk_score?.toFixed(1) || 0;
 }
 
 function getRiskIcon(level) {
@@ -10,7 +17,8 @@ function getRiskIcon(level) {
     'Critical': '🔴',
     'High': '🟠',
     'Medium': '🟡',
-    'Low': '🟢'
+    'Low': '🟢',
+    'Unknown': '⚪'
   };
   return icons[level] || '⚪';
 }
@@ -24,33 +32,58 @@ function formatDateTime(isoString) {
   }
 }
 
-function renderList(items, emptyMessage = 'None found') {
-  if (!Array.isArray(items) || items.length === 0) {
-    return `<li class="empty-list">${emptyMessage}</li>`;
+function formatDomainAge(days) {
+  if (days < 30) return `${days} days old (Very New!) ⚠️`;
+  if (days < 90) return `${days} days old (New)`;
+  if (days < 365) return `${days} days old`;
+  return `${Math.floor(days/365)} years old`;
+}
+
+function getSecurityIndicators(data) {
+  const indicators = [];
+  
+  // SSL Status
+  const hasSSL = data.security_features?.ssl_info?.has_ssl;
+  indicators.push({
+    icon: hasSSL ? '🔒' : '🔓',
+    text: hasSSL ? 'SSL Protected' : 'No SSL Protection',
+    status: hasSSL ? 'secure' : 'warning'
+  });
+
+  // Domain Age
+  const domainAgeDays = data.security_features?.domain_age?.age_days;
+  if (domainAgeDays !== undefined) {
+    indicators.push({
+      icon: domainAgeDays < 30 ? '⚠️' : '📅',
+      text: formatDomainAge(domainAgeDays),
+      status: domainAgeDays < 30 ? 'warning' : 'info'
+    });
+  }
+
+  // Threat Intelligence
+  const isMalicious = data.threat_intel?.is_malicious;
+  if (isMalicious) {
+    indicators.push({
+      icon: '⛔',
+      text: 'Detected in Threat Feeds',
+      status: 'danger'
+    });
+  }
+
+  return indicators;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderList(items, emptyMessage) {
+  if (!items || items.length === 0) {
+    return `<li class="empty-list">${escapeHtml(emptyMessage)}</li>`;
   }
   return items.map(item => `<li>${escapeHtml(item)}</li>`).join('');
-}
-
-function renderObjectProperties(obj) {
-  if (!obj || Object.keys(obj).length === 0) {
-    return '<li class="empty-list">No information available</li>';
-  }
-  
-  return Object.entries(obj)
-    .map(([key, value]) => {
-      const formattedKey = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-      return `<li><strong>${escapeHtml(formattedKey)}:</strong> ${escapeHtml(value)}</li>`;
-    })
-    .join('');
-}
-
-async function getCurrentTabUrl() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab?.url;
-  } catch (error) {
-    throw new Error('Failed to get current tab URL');
-  }
 }
 
 async function getAnalysis() {
@@ -96,10 +129,10 @@ async function getAnalysis() {
     
     if (result.status === 'success' && result.data) {
       const data = result.data.data;
-      const riskScore = data.risk_score || 0;
-      const riskLevel = getRiskLevel(riskScore);
+      const riskLevel = getRiskLevel(data);
+      const riskScore = getRiskScore(data);
       const riskIcon = getRiskIcon(riskLevel);
-      const isValidUrl = data.is_valid_url ? '✅ Valid URL' : '❌ Invalid URL';
+      const securityIndicators = getSecurityIndicators(data);
 
       status.innerHTML = `
         <div class="risk-level ${riskLevel.toLowerCase()}">
@@ -108,7 +141,13 @@ async function getAnalysis() {
             <span>Risk Score</span>
             <strong>${riskScore}</strong>
           </div>
-          <div class="url-status">${isValidUrl}</div>
+          <div class="security-indicators">
+            ${securityIndicators.map(indicator => `
+              <div class="indicator ${indicator.status}">
+                ${indicator.icon} ${indicator.text}
+              </div>
+            `).join('')}
+          </div>
         </div>
       `;
 
@@ -118,37 +157,32 @@ async function getAnalysis() {
             <h3>URL Information</h3>
             <ul>
               <li><strong>URL:</strong> ${escapeHtml(data.url)}</li>
-              <li><strong>Analyzed at:</strong> ${formatDateTime(data.timestamp)}</li>
-            </ul>
-          </div>
-
-          <div class="analysis-section">
-            <h3>Domain Information</h3>
-            <ul>
-              ${renderObjectProperties(data.domain_info)}
+              <li><strong>Domain:</strong> ${escapeHtml(data.domain_info?.full_domain || 'Unknown')}</li>
+              <li><strong>Analyzed:</strong> ${formatDateTime(data.timestamp)}</li>
             </ul>
           </div>
 
           <div class="analysis-section">
             <h3>Risk Factors</h3>
             <ul>
-              ${renderList(data.risk_factors, 'No risk factors detected')}
+              ${renderList(data.risk_assessment?.risk_factors, 'No risk factors detected')}
             </ul>
           </div>
+
+          <div class="analysis-section">
+            <h3>Threat Intelligence</h3>
+            <ul>
+              ${data.threat_intel?.is_malicious ? 
+                data.threat_intel.sources.map(source => 
+                  `<li>⚠️ Detected in ${escapeHtml(source.feed)} as ${escapeHtml(source.type)}</li>`
+                ).join('') : 
+                '<li class="empty-list">No threats detected</li>'
+              }
+            </ul>
+          </div>
+        </div>
       `;
 
-      if (data.redirect_chain && data.redirect_chain.length > 0) {
-        analysisContent += `
-          <div class="analysis-section">
-            <h3>Redirect Chain</h3>
-            <ul>
-              ${renderList(data.redirect_chain, 'No redirects detected')}
-            </ul>
-          </div>
-        `;
-      }
-
-      analysisContent += '</div>';
       analysis.innerHTML = analysisContent;
 
     } else {
@@ -166,14 +200,14 @@ async function getAnalysis() {
   }
 }
 
-function escapeHtml(unsafe) {
-  if (unsafe == null) return '';
-  return String(unsafe)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
+// Add event listener to start analysis when popup loads
 document.addEventListener('DOMContentLoaded', getAnalysis);
+
+// Add debug logging
+function debugLog(message) {
+  const debugLogElement = document.getElementById('debugLog');
+  if (debugLogElement) {
+    debugLogElement.textContent += `${new Date().toISOString()}: ${message}\n`;
+  }
+  console.log(message);
+}

@@ -10,7 +10,7 @@ async function analyzeUrl(url) {
     }
 
     console.log(url);
-    const response = await fetch(`${API_URL}/analyze`, {
+    const response = await fetch(`${API_URL}/api/analyze`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
