@@ -22,10 +22,9 @@ services:
       - OPENPHISH_URL=https://openphish.com/feed.txt
       - URLHAUS_URL=https://urlhaus.abuse.ch/downloads/text_recent/
       # Risk Scoring Weights
-      - WEIGHT_DOMAIN_AGE=0.3
-      - WEIGHT_SSL=0.2
+      - WEIGHT_DOMAIN_AGE=0.8
+      - WEIGHT_SSL=0.4
       - WEIGHT_URL_PATTERNS=0.15
-      - WEIGHT_THREAT_INTEL=0.5
       - WHITELIST_REDUCTION_FACTOR=0.5
     command: flask run --host=0.0.0.0 --port=8000
     depends_on:

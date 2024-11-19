@@ -193,10 +193,22 @@ class URLAnalyzer:
         threat_intel = feed_manager.check_url(url) if feed_manager else {'is_malicious': False, 'sources': []}
         analysis_result['threat_intel'] = threat_intel
         threat_score, threat_factors = self.calculate_threat_score(threat_intel)
+        if threat_intel['is_malicious']:
+            analysis_result['risk_assessment'] = {
+                'risk_factors': ['Found in Threat Intelligence feeds'],
+                'risk_score': 100,
+                'risk_level': 'Critical',
+                'category_scores': {
+                    'domain_age': 100,
+                    'ssl_score': 100,
+                    'url_patterns': 100,
+                    'threat_intel': threat_intel
+                }
+            }
+            return analysis_result
         
         # Combine all scores using Config weights
         risk_scores = risk_analysis['risk_scores']
-        risk_scores['threat_intel'] = threat_score
         
         # Calculate final score using Config.RISK_WEIGHTS
         final_score = sum(

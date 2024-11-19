@@ -27,7 +27,6 @@ class Config:
         'domain_age': float(os.getenv('WEIGHT_DOMAIN_AGE', '0.3')),
         'ssl_score': float(os.getenv('WEIGHT_SSL', '0.2')),
         'url_patterns': float(os.getenv('WEIGHT_URL_PATTERNS', '0.15')),
-        'threat_intel': float(os.getenv('WEIGHT_THREAT_INTEL', '0.35'))
     }
     
     # Whitelist Configuration
