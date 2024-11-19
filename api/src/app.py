@@ -103,6 +103,34 @@ class URLAnalyzer:
         return redirect_chain
 
 
+    def determine_risk_level(self, total_score: float) -> str:
+        """Determine risk level based on total weighted score"""
+        if total_score >= 80:
+            return 'Critical'
+        elif total_score >= 60:
+            return 'High'
+        elif total_score >= 40:
+            return 'Medium'
+        elif total_score >= 20:
+            return 'Low'
+        return 'Minimal'
+
+    def calculate_threat_score(self, threat_intel: Dict) -> tuple[float, List[str]]:
+        """Calculate threat intelligence score (weight: 0.35)"""
+        threat_factors = []
+        
+        if not threat_intel.get('is_malicious'):
+            return 0, threat_factors
+
+        sources = threat_intel.get('sources', [])
+        source_names = [source['feed'] for source in sources]
+        threat_factors.append(f"URL found in threat feeds: {', '.join(source_names)}")
+        
+        # Calculate threat score based on sources
+        threat_score = 100 if sources else 0
+        
+        return threat_score, threat_factors
+
     def analyze_url(self, url: str) -> Dict[str, Any]:
         """Main URL analysis method"""
         analysis_result = {
@@ -114,24 +142,29 @@ class URLAnalyzer:
             'risk_assessment': {},
             'redirect_chain': [],
             'recommendations': [],
-            'threat_intel': {}  # New field for threat intelligence
+            'threat_intel': {}
         }
 
+        # Handle invalid URLs
         if not validators.url(url):
             analysis_result['risk_assessment'] = {
                 'risk_factors': ['Invalid URL format'],
                 'risk_score': 100,
-                'risk_level': 'Critical'
+                'risk_level': 'Critical',
+                'category_scores': {
+                    'domain_age': 100,
+                    'ssl_score': 100,
+                    'url_patterns': 100,
+                    'threat_intel': 100
+                }
             }
             return analysis_result
 
         analysis_result['is_valid_url'] = True
         
-        # Extract domain information
+        # Extract and set domain information
         extracted = tldextract.extract(url)
         parsed_url = urlparse(url)
-        
-        # Domain info
         analysis_result['domain_info'] = {
             'subdomain': extracted.subdomain,
             'domain': extracted.domain,
@@ -141,7 +174,7 @@ class URLAnalyzer:
             'query': parsed_url.query
         }
 
-        # Security checks
+        # Get security features
         security_features = {
             'ssl_info': self.security_checker.get_ssl_info(extracted.fqdn),
             'domain_age': self.security_checker.get_domain_age(extracted.fqdn),
@@ -149,37 +182,58 @@ class URLAnalyzer:
         }
         analysis_result['security_features'] = security_features
 
-        # Check threat intelligence feeds
-        if feed_manager:
-            threat_intel = feed_manager.check_url(url)
-            analysis_result['threat_intel'] = threat_intel
-            
-            # Add risk factors if URL is found in threat feeds
-            if threat_intel['is_malicious']:
-                if 'risk_factors' not in analysis_result['risk_assessment']:
-                    analysis_result['risk_assessment']['risk_factors'] = []
-                analysis_result['risk_assessment']['risk_factors'].append(
-                    f"URL found in threat feeds: {', '.join(source['feed'] for source in threat_intel['sources'])}"
-                )
-
-        # Risk analysis
-        analysis_result['risk_assessment'] = self.risk_analyzer.analyze_risk(
+        # Get base risk analysis
+        risk_analysis = self.risk_analyzer.analyze_risk(
             url,
             analysis_result['domain_info'],
-            security_features,
-            analysis_result['threat_intel']  # Pass threat intel to risk analyzer
+            security_features
+        )
+        
+        # Get threat intelligence score
+        threat_intel = feed_manager.check_url(url) if feed_manager else {'is_malicious': False, 'sources': []}
+        analysis_result['threat_intel'] = threat_intel
+        threat_score, threat_factors = self.calculate_threat_score(threat_intel)
+        
+        # Combine all scores using Config weights
+        risk_scores = risk_analysis['risk_scores']
+        risk_scores['threat_intel'] = threat_score
+        
+        # Calculate final score using Config.RISK_WEIGHTS
+        final_score = sum(
+            score * Config.RISK_WEIGHTS[category]
+            for category, score in risk_scores.items()
         )
 
-        # Check redirects
+        # Apply whitelist reduction if applicable
+        if self._is_whitelisted(analysis_result['domain_info']):
+            final_score *= Config.WHITELIST_REDUCTION_FACTOR
+            risk_analysis['risk_factors'].append('Score reduced due to whitelisted domain')
+
+        # Set final risk assessment
+        analysis_result['risk_assessment'] = {
+            'risk_score': min(100, round(final_score, 2)),
+            'risk_factors': risk_analysis['risk_factors'] + threat_factors,
+            'risk_level': self.determine_risk_level(final_score),
+            'category_scores': risk_scores
+        }
+
+        # Add redirect chain analysis
         redirect_chain = self.check_redirect_chain(url)
         if len(redirect_chain) > 1:
             analysis_result['redirect_chain'] = redirect_chain
-            analysis_result['risk_assessment']['risk_factors'].append('Multiple redirects detected')
+            analysis_result['risk_assessment']['risk_factors'].append(
+                f'Multiple redirects detected: {len(redirect_chain)} redirects'
+            )
 
-        # Generate recommendations based on risk factors
+        # Generate recommendations
         self._generate_recommendations(analysis_result)
         
         return analysis_result
+    
+    def _is_whitelisted(self, domain_info: Dict) -> bool:
+        """Check if domain is whitelisted"""
+        trusted_tlds = {'gov', 'edu', 'mil'}
+        return domain_info.get('suffix', '').lower() in trusted_tlds
 
     def _generate_recommendations(self, analysis_result: Dict) -> None:
         """Generate recommendations based on risk assessment"""

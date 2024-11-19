@@ -23,44 +23,61 @@ class RiskAnalyzer:
         ]
 
     def analyze_risk(self, url: str, domain_info: Dict, 
-                    security_checks: Dict, threat_intel: Dict) -> Dict:
+                    security_checks: Dict) -> Dict:
+        """
+        Analyzes various risk factors and returns raw scores
+        Based on weights from Config.RISK_WEIGHTS:
+            domain_age: 0.3
+            ssl_score: 0.2
+            url_patterns: 0.15
+            threat_intel: 0.35
+        """
         risk_factors = []
-        risk_score = 0
+        risk_scores = {}
         
-        # Domain age analysis
+        # Domain age analysis (weight: 0.3)
         domain_age = security_checks.get('domain_age', {}).get('age_days', 0)
         if domain_age < 30:
-            risk_factors.append('Domain is less than 30 days old')
-            risk_score += 30 * Config.RISK_WEIGHTS['domain_age']
+            risk_factors.append(f'Domain is {domain_age} days old (less than 30 days)')
+            risk_scores['domain_age'] = min(100, (30 - domain_age) * 3.33)
+        elif domain_age < 90:
+            risk_factors.append(f'Domain is relatively new ({domain_age} days old)')
+            risk_scores['domain_age'] = min(100, (90 - domain_age) * 1.11)
+        else:
+            risk_scores['domain_age'] = 0
 
-        # SSL analysis
+        # SSL analysis (weight: 0.2)
         ssl_info = security_checks.get('ssl_info', {})
         if not ssl_info.get('has_ssl'):
             risk_factors.append('No SSL/TLS security')
-            risk_score += 25 * Config.RISK_WEIGHTS['ssl_score']
+            risk_scores['ssl_score'] = 100
+        elif not ssl_info.get('is_valid', True):
+            risk_factors.append('Invalid SSL certificate')
+            risk_scores['ssl_score'] = 80
+        elif ssl_info.get('days_until_expiry', 30) < 7:
+            risk_factors.append('SSL certificate near expiration')
+            risk_scores['ssl_score'] = 50
+        else:
+            risk_scores['ssl_score'] = 0
 
-        # Pattern analysis
+        # URL Pattern analysis (weight: 0.15)
+        pattern_matches = 0
         for pattern in self.suspicious_patterns:
             if re.search(pattern, url, re.IGNORECASE):
+                pattern_matches += 1
                 risk_factors.append(f'Suspicious pattern detected: {pattern}')
-                risk_score += 20 * Config.RISK_WEIGHTS['url_patterns']
-
-        # Threat intelligence
-        if threat_intel.get('is_malicious'):
-            risk_factors.append('URL found in threat feeds')
-            risk_score += 40 * Config.RISK_WEIGHTS['threat_intel']
+        
+        keyword_matches = 0
+        url_lower = url.lower()
+        for keyword in self.suspicious_keywords:
+            if keyword in url_lower:
+                keyword_matches += 1
+                risk_factors.append(f'Suspicious keyword detected: {keyword}')
+        
+        # Calculate URL pattern score
+        risk_scores['url_patterns'] = min(100, (pattern_matches * 20) + (keyword_matches * 15))
 
         return {
-            'risk_score': min(100, risk_score),
-            'risk_factors': risk_factors,
-            'risk_level': self._get_risk_level(risk_score)
+            'risk_scores': risk_scores,
+            'risk_factors': risk_factors
         }
-
-    def _get_risk_level(self, score: float) -> str:
-        if score >= 80:
-            return 'Critical'
-        elif score >= 60:
-            return 'High'
-        elif score >= 40:
-            return 'Medium'
-        return 'Low'
