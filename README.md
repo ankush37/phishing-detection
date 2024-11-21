@@ -23,10 +23,7 @@ A powerful browser extension that provides real-time protection against phishing
 
 ## Installation
 
-### For Developers
-
 #### Prerequisites
-- Python 3.8+
 - Docker and Docker Compose
 - Chrome Browser
 
@@ -38,39 +35,18 @@ git clone https://github.com/yourusername/phishing-shield.git
 cd phishing-shield
 ```
 
-2. **Set up the backend environment**
-```bash
-# Create and activate virtual environment
-python -m venv venv
-
-# Linux/Mac
-source venv/bin/activate
-
-# Windows
-venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-3. **Start the services**
+2. **Start the services**
 ```bash
 # Start backend services
 docker compose up --build
 ```
 
-5. **Load the extension in Chrome**
+3. **Load the extension in Chrome**
 - Open Chrome and navigate to `chrome://extensions/`
 - Enable "Developer mode" in the top right
 - Click "Load unpacked" and select the `extension` directory
 - The extension icon should appear in your toolbar
 
-6. **Run tests**
-```bash
-# Run backend tests
-pytest
-
-```
 ## Architecture
 
 The extension consists of three main components:
@@ -82,7 +58,6 @@ The extension consists of three main components:
 The backend API provides:
 - URL analysis endpoints
 - Threat intelligence integration
-- Machine learning classification
 - Security feature verification
 
 ## Contributing
